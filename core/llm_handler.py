@@ -16,8 +16,7 @@ class LLMHandler:
     """
     def __init__(self):
         self.api_key = os.getenv("LLM_API_KEY", "")
-        # Giữ nguyên cấu hình model theo xác nhận của cậu
-        self.model_name = "gemini-3-flash-preview"
+        self.model_name = "gemini-2.5-flash-lite"
         self.endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.api_key}"
 
     def get_system_prompt(self) -> str:
