@@ -5,11 +5,13 @@ import requests
 from requests.auth import HTTPBasicAuth
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("AtlassianConnector")
 
 class AtlassianConnector:
     """
     Connector chịu trách nhiệm gọi API Jira/Confluence trực tiếp.
     Đã cập nhật endpoint search sang /search/jql theo yêu cầu bắt buộc của Atlassian Cloud.
+    Đã tăng limit lên 50 để tránh bỏ sót các trang tài liệu mới tạo do dính trang mẫu mặc định.
     """
     
     def __init__(self):
@@ -41,13 +43,13 @@ class AtlassianConnector:
         Sử dụng endpoint /rest/api/3/search/jql để tránh lỗi HTTP 410.
         """
         if not all([self.jira_url, self.jira_email, self.jira_token, self.jira_project]):
-            logging.warning("⚠️ Thiếu cấu hình Jira. Sẽ sử dụng Mock Data.")
+            logger.warning("⚠️ Thiếu cấu hình Jira. Sẽ sử dụng Mock Data.")
             return []
 
         jql = f"project={self.jira_project}"
         headers = {"Accept": "application/json"}
         auth = HTTPBasicAuth(self.jira_email, self.jira_token)
-        params = {"jql": jql, "maxResults": 10}
+        params = {"jql": jql, "maxResults": 50}
 
         # Định nghĩa các phương án endpoint mới thử nghiệm tuần tự (/search/jql)
         endpoints = [
@@ -60,7 +62,7 @@ class AtlassianConnector:
         
         for ep in endpoints:
             try:
-                logging.info(f"[AtlassianConnector] Thử kết nối Jira bằng API {ep['version']} (/search/jql)...")
+                logger.info(f"[Jira] Thử kết nối bằng API {ep['version']} (/search/jql)...")
                 res = requests.get(ep["url"], headers=headers, auth=auth, params=params, timeout=5)
                 
                 if res.status_code == 200:
@@ -68,12 +70,12 @@ class AtlassianConnector:
                     selected_version = ep["version"]
                     break
                 else:
-                    logging.warning(f"⚠️ API {ep['version']} trả về HTTP {res.status_code}. Thử phương án tiếp theo...")
+                    logger.warning(f"⚠️ API {ep['version']} trả về HTTP {res.status_code}. Thử phương án tiếp theo...")
             except Exception as e:
-                logging.error(f"❌ Lỗi khi gọi endpoint {ep['version']}: {e}")
+                logger.error(f"❌ Lỗi khi gọi endpoint {ep['version']}: {e}")
 
         if not response:
-            logging.error("❌ Không thể lấy dữ liệu từ Jira bằng cả v3 và v2 với endpoint /search/jql.")
+            logger.error("❌ Không thể lấy dữ liệu từ Jira bằng cả v3 và v2 với endpoint /search/jql.")
             return []
 
         try:
@@ -112,17 +114,17 @@ class AtlassianConnector:
                     "metadata": {"source": f"jira/{key}", "type": "task"}
                 })
             
-            logging.info(f"⚡ Đã tải thành công {len(cleaned_tasks)} task từ Jira Live (Dùng API {selected_version} - /search/jql)!")
+            logger.info(f"⚡ Đã tải thành công {len(cleaned_tasks)} task từ Jira Live (API {selected_version})!")
             return cleaned_tasks
 
         except Exception as e:
-            logging.error(f"❌ Lỗi parse dữ liệu JSON từ Jira: {e}")
+            logger.error(f"❌ Lỗi parse dữ liệu JSON từ Jira: {e}")
             return []
 
     def fetch_live_confluence_pages(self) -> list[dict]:
         """Gọi API Confluence lấy các tài liệu SOP văn hóa công ty."""
         if not all([self.confluence_url, self.confluence_email, self.confluence_token, self.confluence_space]):
-            logging.warning("⚠️ Thiếu cấu hình Confluence. Sẽ sử dụng Mock Data.")
+            logger.warning("⚠️ Thiếu cấu hình Confluence. Sẽ sử dụng Mock Data.")
             return []
 
         url = f"{self.confluence_url.rstrip('/')}/wiki/api/v2/pages"
@@ -131,13 +133,13 @@ class AtlassianConnector:
         params = {
             "spaceKey": self.confluence_space,
             "body-format": "storage",
-            "limit": 5
+            "limit": 50  # Tăng lên 50 để tránh nuốt trang tài liệu mới của người dùng
         }
 
         try:
             response = requests.get(url, headers=headers, auth=auth, params=params, timeout=5)
             if response.status_code != 200:
-                logging.error(f"❌ Confluence API trả về lỗi: {response.status_code}")
+                logger.error(f"❌ Confluence API trả về lỗi: {response.status_code}")
                 return []
 
             data = response.json()
@@ -148,15 +150,18 @@ class AtlassianConnector:
                 body_html = page.get("body", {}).get("storage", {}).get("value", "")
                 cleaned_body = self.clean_html(body_html)
 
+                # Log chi tiết tên từng trang để kiểm tra trên màn hình log Render
+                logger.info(f"📄 Đã nạp thành công trang Confluence: \"{title}\"")
+
                 semantic_content = f"[Confluence Document] Tiêu đề: {title}. Nội dung quy trình: {cleaned_body}"
                 cleaned_pages.append({
                     "content": semantic_content,
                     "metadata": {"source": f"confluence/{page_id}", "type": "policy"}
                 })
 
-            logging.info(f"⚡ Đã tải thành công {len(cleaned_pages)} trang từ Confluence Live!")
+            logger.info(f"⚡ Đã nạp thành công tổng cộng {len(cleaned_pages)} trang từ Confluence Live vào RAG!")
             return cleaned_pages
 
         except Exception as e:
-            logging.error(f"❌ Lỗi kết nối Confluence API: {e}")
+            logger.error(f"❌ Lỗi kết nối Confluence API: {e}")
             return []
