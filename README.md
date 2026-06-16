@@ -316,12 +316,3 @@ For production deployments, use a secure secret manager instead of local environ
 
 ---
 
-## License
-
-Add your project license here.
-
-Example:
-
-```text
-MIT License
-```
