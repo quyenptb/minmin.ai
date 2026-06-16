@@ -3,118 +3,109 @@ import json
 import time
 import logging
 import requests
+from typing import Dict
 
-# Khởi tạo cấu hình logging chuẩn để đẩy log trực tiếp lên Render không qua buffer
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("LLMHandler")
 
 class LLMHandler:
     """
-    Xử lý gọi mô hình ngôn ngữ lớn (gemini-3-flash-preview) bằng API trực tiếp.
-    Sử dụng logging hệ thống thay thế print() để hiển thị log tức thì trên Render.
-    Tích hợp cơ chế thử lại lũy thừa (Exponential Backoff) khi gặp lỗi mạng.
+    Trái tim của Neuro-Sync MAS chứa 2 Đại lý (Agents) chuyên biệt.
+    Đã được nâng cấp để sử dụng OpenAI (Codex/GPT) theo yêu cầu, 
+    đảm bảo Deterministic Engineering (Luôn trả về JSON chuẩn).
     """
     def __init__(self):
-        self.api_key = os.getenv("LLM_API_KEY", "")
-        self.model_name = "gemini-2.5-flash-lite"
-        self.endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model_name}:generateContent?key={self.api_key}"
+        self.api_key = os.getenv("OPENAI_API_KEY", "")
+        # Khuyên dùng gpt-4o-mini hoặc gpt-4o để tốc độ nhanh nhất trong Hackathon
+        self.model_name = "gpt-4o-mini" 
+        self.endpoint = "https://api.openai.com/v1/chat/completions"
 
-    def get_system_prompt(self) -> str:
-        return (
-            "Bạn là Sếp Park (Park Ji-hoon), Giám đốc điều hành người Hàn Quốc của công ty KTC tại Việt Nam.\n"
-            "Tính cách của bạn: Nghiêm túc, đòi hỏi cao trong công việc nhưng rất quan tâm đến cấp dưới (đặc trưng văn hóa Nunchi).\n"
-            "Cách giao tiếp: Thỉnh thoảng chêm một vài từ tiếng Hàn phổ biến (Bogo, Gyeoljae, Hoesik, Ne, Kamsahamnida) để giữ bản sắc, "
-            "nhưng câu trả lời chính phải bằng tiếng Việt dễ hiểu, mạch lạc.\n"
-            "Nhiệm vụ: Trả lời câu hỏi của nhân viên mới dựa trên ngữ cảnh công ty được cung cấp. Tuyệt đối không bịa đặt thông tin nằm ngoài ngữ cảnh.\n"
-            "Bạn bắt buộc phải trả về dữ liệu đúng cấu trúc JSON được yêu cầu."
-        )
-
-    def generate_response(self, user_query: str, retrieved_context: list[dict]) -> dict:
+    def _call_openai(self, system_prompt: str, user_prompt: str) -> dict:
         if not self.api_key:
-            logger.warning("⚠️ Chưa cấu hình LLM_API_KEY trong biến môi trường!")
-            return {
-                "response_vi": "Chào cậu, hiện tại hệ thống AI của sếp đang bảo trì do thiếu API Key. Cậu vui lòng liên hệ HR hỗ trợ nhé!",
-                "korean_terms_explained": {},
-                "escalate": False,
-                "confidence": 0.0
-            }
+            logger.error("OPENAI_API_KEY is missing. Vui lòng cấu hình trong file .env")
+            return {}
 
-        # Tạo prompt gộp ngữ cảnh RAG
-        context_str = "\n".join([f"- {doc['title']} (Nguồn: {doc['source']}): {doc['content']}" for doc in retrieved_context])
-        prompt_text = (
-            f"Ngữ cảnh tài liệu công ty:\n{context_str}\n\n"
-            f"Câu hỏi của nhân viên: \"{user_query}\"\n\n"
-            "Hãy phân tích và trả lời với tư cách Sếp Park dưới định dạng JSON."
-        )
-
-        # Định nghĩa cấu trúc JSON đầu ra bắt buộc cho Gemini
-        payload = {
-            "contents": [{
-                "parts": [{"text": prompt_text}]
-            }],
-            "systemInstruction": {
-                "parts": [{"text": self.get_system_prompt()}]
-            },
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "responseSchema": {
-                    "type": "OBJECT",
-                    "properties": {
-                        "response_vi": {
-                            "type": "STRING",
-                            "description": "Câu trả lời bằng tiếng Việt của sếp Park, có chêm từ tiếng Hàn."
-                        },
-                        "korean_terms_explained": {
-                            "type": "OBJECT",
-                            "description": "Giải thích các từ tiếng Hàn vừa dùng trong câu trả lời (Key: từ tiếng Hàn, Value: nghĩa tiếng Việt)."
-                        },
-                        "escalate": {
-                            "type": "BOOLEAN",
-                            "description": "Đặt thành true nếu câu hỏi của nhân viên thể hiện sự mệt mỏi, bế tắc, áp lực cao, hoặc muốn nghỉ việc."
-                        },
-                        "confidence": {
-                            "type": "NUMBER",
-                            "description": "Mức độ tự tin của câu trả lời dựa trên tài liệu được cung cấp (từ 0.0 đến 1.0)."
-                        }
-                    },
-                    "required": ["response_vi", "korean_terms_explained", "escalate", "confidence"]
-                }
-            }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}"
         }
 
-        # Cơ chế Exponential Backoff để thử lại tối đa 5 lần
+        payload = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            # Tính năng tối thượng của OpenAI để ép LLM trả về JSON
+            "response_format": {"type": "json_object"}
+        }
+
         delay = 1.0
-        for attempt in range(5):
+        for attempt in range(3):
             try:
-                logger.info(f"🔑 Đang gửi yêu cầu tới Gemini API ({self.model_name}) - Lần thử {attempt + 1}...")
-                response = requests.post(self.endpoint, json=payload, headers={"Content-Type": "application/json"}, timeout=15)
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
-                    logger.info("✅ Nhận phản hồi thành công từ Gemini API!")
+                res = requests.post(self.endpoint, headers=headers, json=payload, timeout=20)
+                if res.status_code == 200:
+                    raw_text = res.json()["choices"][0]["message"]["content"]
                     return json.loads(raw_text)
                 
-                # Ghi nhận log lỗi chi tiết ngay lập tức lên bảng điều khiển Render
-                logger.error(f"❌ Gemini API trả về lỗi HTTP {response.status_code}: {response.text}")
-                
-                # Nếu dính lỗi giới hạn lượt gọi (429) hoặc lỗi máy chủ (5xx) thì ngủ và thử lại
-                if response.status_code in [429, 500, 502, 503, 504]:
+                if res.status_code in [429, 500, 502, 503, 504]:
                     time.sleep(delay)
                     delay *= 2
                     continue
                 else:
+                    logger.error(f"OpenAI Error {res.status_code}: {res.text}")
                     break
             except Exception as e:
-                logger.error(f"❌ Lỗi kết nối vật lý tới Gemini API: {str(e)}")
+                logger.error(f"Network error calling OpenAI: {e}")
                 time.sleep(delay)
                 delay *= 2
+        return {}
 
-        # Fallback an toàn nếu toàn bộ API thất bại
-        logger.warning("⚠️ Kích hoạt chế độ Fallback Response cho sếp Park.")
-        return {
-            "response_vi": "Ne, sếp đang bận xử lý một số cuộc họp khẩn cấp. Cậu hỏi lại sau vài giây nữa nhé, hoặc kiểm tra lại kết nối mạng nha!",
-            "korean_terms_explained": {"Ne": "Vâng, ừ"},
-            "escalate": False,
-            "confidence": 0.5
-        }
+    # ==========================================
+    # AGENT 1: CHATOPS PARSER (Slack -> Jira)
+    # ==========================================
+    def parse_teacher_command(self, raw_command: str) -> Dict:
+        """Trích xuất thực thể từ câu nói của giáo viên thành data cấu trúc."""
+        system_prompt = (
+            "You are an NLP parser for an Individualized Education Program (IEP). "
+            "Extract student name, completed goal, and new goal. "
+            "Output MUST be valid JSON: {\"student_name\": \"str\", \"completed_goal\": \"str|null\", \"new_goal\": \"str\"}"
+        )
+        user_prompt = f"Teacher command: '{raw_command}'"
+        
+        result = self._call_openai(system_prompt, user_prompt)
+        if not result:
+            return {"student_name": "Unknown", "completed_goal": None, "new_goal": "Unspecified"}
+        return result
+
+    # ==========================================
+    # AGENT 2: DIAGNOSTICIAN (Telemetry -> UI JSON)
+    # ==========================================
+    def diagnostician_reasoning(self, jira_context: str, confluence_context: str, telemetry_event: str) -> Dict:
+        """Trả về JSON cấu hình UI dựa trên dữ liệu RAG và Telemetry."""
+        system_prompt = (
+            "You are the Diagnostician Agent in a Neuro-Sync System. "
+            "Provide real-time UI/UX interventions for children with special educational needs. "
+            "OUTPUT STRICTLY VALID JSON."
+        )
+        user_prompt = (
+            f"INPUT DATA:\n"
+            f"1. JIRA_CONTEXT (Task): {jira_context}\n"
+            f"2. CONFLUENCE_CONTEXT (Profile): {confluence_context}\n"
+            f"3. TELEMETRY_EVENT (Anomaly): {telemetry_event}\n\n"
+            "Output schema:\n"
+            "{\n"
+            "  \"intervention_id\": \"INT-XYZ\",\n"
+            "  \"reasoning\": \"Brief logical explanation\",\n"
+            "  \"ui_state\": {\"theme_color\": \"#HexColor\", \"lottie_speed_multiplier\": 0.5, \"visual_complexity\": \"low\"},\n"
+            "  \"slack_notification\": \"Vietnamese alert for teacher\"\n"
+            "}"
+        )
+
+        result = self._call_openai(system_prompt, user_prompt)
+        if not result:
+            return {
+                "intervention_id": "FALLBACK-01",
+                "ui_state": {"theme_color": "#e2e8f0", "lottie_speed_multiplier": 0.5, "visual_complexity": "low"},
+                "slack_notification": "Hệ thống tự động chuyển sang Calm Mode do mất kết nối AI."
+            }
+        return result
